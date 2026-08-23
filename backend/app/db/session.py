@@ -12,6 +12,7 @@ import ssl
 from collections.abc import AsyncIterator
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from uuid import uuid4
 
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -27,11 +28,20 @@ _LIBPQ_ONLY_PARAMS = {"sslmode", "channel_binding"}
 _SSL_MODES_REQUIRING_TLS = {"require", "verify-ca", "verify-full", "prefer", "allow"}
 
 
-def _split_url_and_connect_args(raw_url: str) -> tuple[str, dict[str, Any]]:
-    """Return an asyncpg-safe URL plus ``connect_args`` for TLS.
+def _is_transaction_pooler(hostname: str | None) -> bool:
+    """Heuristic: Neon/Supabase transaction-mode poolers embed ``pooler`` in the host."""
+    return hostname is not None and "pooler" in hostname.lower()
 
-    Strips ``sslmode``/``channel_binding`` from the query string and, when TLS
-    is requested, supplies a default SSL context (valid for Neon/Supabase).
+
+def _split_url_and_connect_args(raw_url: str) -> tuple[str, dict[str, Any]]:
+    """Return an asyncpg-safe URL plus ``connect_args``.
+
+    - Strips ``sslmode``/``channel_binding`` from the query string and, when TLS
+      is requested, supplies a default SSL context (valid for Neon/Supabase).
+    - For transaction-mode poolers (PgBouncer, e.g. Neon's ``-pooler`` host),
+      disables prepared-statement caching. asyncpg caches server-side prepared
+      statements by default; through a transaction pooler those collide across
+      backends and raise ``DuplicatePreparedStatementError``.
     """
     parts = urlsplit(raw_url)
     query = dict(parse_qsl(parts.query))
@@ -39,6 +49,11 @@ def _split_url_and_connect_args(raw_url: str) -> tuple[str, dict[str, Any]]:
 
     if query.get("sslmode") in _SSL_MODES_REQUIRING_TLS:
         connect_args["ssl"] = ssl.create_default_context()
+
+    if _is_transaction_pooler(parts.hostname):
+        connect_args["statement_cache_size"] = 0  # asyncpg's own cache
+        connect_args["prepared_statement_cache_size"] = 0  # SQLAlchemy asyncpg dialect
+        connect_args["prepared_statement_name_func"] = lambda: f"__asyncpg_{uuid4()}__"
 
     cleaned_query = {k: v for k, v in query.items() if k not in _LIBPQ_ONLY_PARAMS}
     cleaned_url = urlunsplit(
