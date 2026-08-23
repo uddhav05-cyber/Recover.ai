@@ -34,6 +34,19 @@ extend-exclude = ["migrations/versions"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC"]
 
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency-injection idiom puts Depends()/Query()/... in argument
+# defaults by design; these calls are effectively immutable, so B008 is a false
+# positive here.
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Header",
+    "fastapi.Body",
+    "fastapi.Security",
+]
+
 [tool.mypy]
 python_version = "3.13"
 ignore_missing_imports = true

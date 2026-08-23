@@ -1,7 +1,8 @@
 """FastAPI application entrypoint.
 
-Phase 1 exposes a root banner and a ``/health`` probe that pings the database.
-Later phases add the webhook route, the agent pipeline, and dashboard APIs.
+Exposes a root banner, a ``/health`` probe that pings the database, and the
+Razorpay webhook ingestion route (Phase 2). Later phases add the agent pipeline
+and dashboard APIs.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
+from app.api.webhooks import router as webhook_router
 from app.config import get_settings
 from app.db.session import engine
 
@@ -31,6 +33,8 @@ app = FastAPI(
     description="Autonomous Razorpay subscription payment recovery agent.",
     lifespan=lifespan,
 )
+
+app.include_router(webhook_router)
 
 
 @app.get("/")
