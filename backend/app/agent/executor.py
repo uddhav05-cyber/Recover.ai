@@ -17,6 +17,11 @@ convention:
   the "requested" audit row + ``executing`` status are *committed* before the
   HTTP call, so a crash mid-call still leaves a durable record of intent.
 
+The post-diagnosis core (Decide -> Guardrail -> Act) is factored into
+:func:`apply_decision`, so the Phase-4 retry scheduler can reuse the *exact* same
+bounded ladder when a due retry does not recover — the behaviour never diverges
+between the two entry points.
+
 Razorpay is reached through the injected :class:`RecoveryClient` protocol, so
 this module unit-tests against a fake with an explicit ``now`` (no hidden clock,
 no live network) and swaps in the real client once test keys are configured.
@@ -83,6 +88,19 @@ class RecoveryResult:
     scheduled_at: datetime | None = None
     razorpay_payment_link_id: str | None = None
     detail: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class AppliedDecision:
+    """What :func:`apply_decision` proposed, how the guardrail ruled, and the result."""
+
+    action_id: uuid.UUID
+    action_type: ActionType
+    status: ActionStatus
+    verdict: GuardrailVerdict
+    rationale: str
+    scheduled_at: datetime | None = None
+    payment_link_id: str | None = None
 
 
 def _to_sub_status(value: str | None) -> SubscriptionStatus | None:
@@ -170,6 +188,160 @@ def _audit(
         diagnosis_id=diagnosis_id,
         recovery_action_id=recovery_action_id,
         detail=detail,
+    )
+
+
+async def apply_decision(
+    session: AsyncSession,
+    *,
+    now: datetime,
+    client: RecoveryClient | None,
+    config: GuardrailConfig,
+    diagnosis_id: uuid.UUID,
+    subscription_id: uuid.UUID,
+    category: DiagnosisCategory,
+    subscription_status: SubscriptionStatus | None,
+    attempts_so_far: int,
+    last_attempt_at: datetime | None,
+    amount: int | None,
+    currency: str,
+    rzp_sub_id: str,
+    triggering_event_id: uuid.UUID | None,
+) -> AppliedDecision:
+    """Decide -> Guardrail -> Act for one diagnosed failure (shared by executor + poller).
+
+    Persists a ``recovery_actions`` row, writes the guardrail verdict to
+    ``audit_log`` **before** any execution, and only reaches Razorpay (payment
+    link) when the guardrail allows. The guardrail — not the policy, never the
+    LLM — has the final say: execution branches on ``verdict.allowed`` alone.
+    """
+    decision = decide(category, attempts_so_far=attempts_so_far, max_retries=config.max_retries)
+
+    action = RecoveryAction(
+        diagnosis_id=diagnosis_id,
+        subscription_id=subscription_id,
+        action_type=decision.action_type,
+        status=ActionStatus.PLANNED,
+        attempt_number=attempts_so_far + 1,
+    )
+    session.add(action)
+    await session.flush()
+    action_id = action.id
+
+    ctx = GuardrailContext(
+        now=now,
+        subscription_status=subscription_status,
+        mandate_cancelled=category is DiagnosisCategory.MANDATE_REVOKED,
+        retry_attempts_used=attempts_so_far,
+        last_attempt_at=last_attempt_at,
+    )
+    verdict: GuardrailVerdict = evaluate(decision.action_type, ctx, config)
+    action.guardrail_decision = verdict.audit_detail()
+    session.add(
+        _audit(
+            actor=AuditActor.GUARDRAIL,
+            action="guardrail.allow" if verdict.allowed else "guardrail.deny",
+            subscription_id=subscription_id,
+            payment_event_id=triggering_event_id,
+            diagnosis_id=diagnosis_id,
+            recovery_action_id=action_id,
+            detail={**verdict.audit_detail(), "policy_rationale": decision.rationale},
+        )
+    )
+
+    result_status: ActionStatus
+    link_id: str | None = None
+    scheduled_at: datetime | None = None
+
+    if not verdict.allowed:
+        # Gate said no: record and stop. No external call is ever attempted.
+        action.status = ActionStatus.SKIPPED
+        action.error = verdict.reason
+        result_status = ActionStatus.SKIPPED
+
+    elif decision.action_type is ActionType.RETRY_CHARGE:
+        # Bounded, delayed retry: schedule it; the Phase-4 poller executes it.
+        scheduled_at = now + decision.delay if decision.delay else now
+        action.status = ActionStatus.SCHEDULED
+        action.scheduled_at = scheduled_at
+        result_status = ActionStatus.SCHEDULED
+        session.add(
+            _audit(
+                actor=AuditActor.SYSTEM,
+                action="recovery.retry.scheduled",
+                subscription_id=subscription_id,
+                recovery_action_id=action_id,
+                detail={"scheduled_at": scheduled_at.isoformat()},
+            )
+        )
+
+    elif decision.action_type is ActionType.ESCALATE_MANUAL:
+        action.status = ActionStatus.EXECUTED
+        action.executed_at = now
+        result_status = ActionStatus.EXECUTED
+        session.add(
+            RecoveryOutcome(
+                subscription_id=subscription_id,
+                recovery_action_id=action_id,
+                triggering_payment_event_id=triggering_event_id,
+                outcome=OutcomeStatus.ESCALATED,
+                amount_at_risk=amount or 0,
+                resolved_at=now,
+            )
+        )
+        session.add(
+            _audit(
+                actor=AuditActor.SYSTEM,
+                action="recovery.escalated",
+                subscription_id=subscription_id,
+                recovery_action_id=action_id,
+            )
+        )
+
+    elif decision.action_type is ActionType.MARK_DEAD:
+        action.status = ActionStatus.EXECUTED
+        action.executed_at = now
+        result_status = ActionStatus.EXECUTED
+        session.add(
+            RecoveryOutcome(
+                subscription_id=subscription_id,
+                recovery_action_id=action_id,
+                triggering_payment_event_id=triggering_event_id,
+                outcome=OutcomeStatus.DEAD,
+                amount_at_risk=amount or 0,
+                resolved_at=now,
+            )
+        )
+        session.add(
+            _audit(
+                actor=AuditActor.SYSTEM,
+                action="recovery.mark_dead",
+                subscription_id=subscription_id,
+                recovery_action_id=action_id,
+            )
+        )
+
+    else:  # ActionType.SEND_PAYMENT_LINK — the externally-visible money move.
+        link_id, result_status = await execute_payment_link(
+            session,
+            now=now,
+            client=client,
+            action_id=action_id,
+            subscription_id=subscription_id,
+            event_id=triggering_event_id,
+            amount=amount,
+            currency=currency,
+            rzp_sub_id=rzp_sub_id,
+        )
+
+    return AppliedDecision(
+        action_id=action_id,
+        action_type=decision.action_type,
+        status=result_status,
+        verdict=verdict,
+        rationale=decision.rationale,
+        scheduled_at=scheduled_at,
+        payment_link_id=link_id,
     )
 
 
@@ -285,127 +457,24 @@ async def run_recovery(
         )
     )
 
-    # --- Decide ----------------------------------------------------------------
+    # --- Decide -> Guardrail -> Act (shared with the Phase-4 poller) -----------
     attempts_so_far, last_attempt_at = await _retry_history(session, subscription_id)
-    decision = decide(
-        dx.category, attempts_so_far=attempts_so_far, max_retries=config.max_retries
-    )
-
-    action = RecoveryAction(
+    applied = await apply_decision(
+        session,
+        now=now,
+        client=client,
+        config=config,
         diagnosis_id=diagnosis_id,
         subscription_id=subscription_id,
-        action_type=decision.action_type,
-        status=ActionStatus.PLANNED,
-        attempt_number=attempts_so_far + 1,
-    )
-    session.add(action)
-    await session.flush()
-    action_id = action.id
-
-    # --- Guardrail (the final say) + audit BEFORE any execution ----------------
-    ctx = GuardrailContext(
-        now=now,
+        category=dx.category,
         subscription_status=subscription.status,
-        mandate_cancelled=dx.category is DiagnosisCategory.MANDATE_REVOKED,
-        retry_attempts_used=attempts_so_far,
+        attempts_so_far=attempts_so_far,
         last_attempt_at=last_attempt_at,
+        amount=amount,
+        currency=currency,
+        rzp_sub_id=rzp_sub_id,
+        triggering_event_id=event_id,
     )
-    verdict: GuardrailVerdict = evaluate(decision.action_type, ctx, config)
-    action.guardrail_decision = verdict.audit_detail()
-    session.add(
-        _audit(
-            actor=AuditActor.GUARDRAIL,
-            action="guardrail.allow" if verdict.allowed else "guardrail.deny",
-            subscription_id=subscription_id,
-            payment_event_id=event_id,
-            diagnosis_id=diagnosis_id,
-            recovery_action_id=action_id,
-            detail={**verdict.audit_detail(), "policy_rationale": decision.rationale},
-        )
-    )
-
-    result_status: ActionStatus
-    link_id: str | None = None
-
-    if not verdict.allowed:
-        # Gate said no: record and stop. No external call is ever attempted.
-        action.status = ActionStatus.SKIPPED
-        action.error = verdict.reason
-        result_status = ActionStatus.SKIPPED
-
-    elif decision.action_type is ActionType.RETRY_CHARGE:
-        # Bounded, delayed retry: schedule it; the Phase-4 poller executes it.
-        action.status = ActionStatus.SCHEDULED
-        action.scheduled_at = now + decision.delay if decision.delay else now
-        result_status = ActionStatus.SCHEDULED
-        session.add(
-            _audit(
-                actor=AuditActor.SYSTEM,
-                action="recovery.retry.scheduled",
-                subscription_id=subscription_id,
-                recovery_action_id=action_id,
-                detail={"scheduled_at": action.scheduled_at.isoformat()},
-            )
-        )
-
-    elif decision.action_type is ActionType.ESCALATE_MANUAL:
-        action.status = ActionStatus.EXECUTED
-        action.executed_at = now
-        result_status = ActionStatus.EXECUTED
-        session.add(
-            RecoveryOutcome(
-                subscription_id=subscription_id,
-                recovery_action_id=action_id,
-                triggering_payment_event_id=event_id,
-                outcome=OutcomeStatus.ESCALATED,
-                amount_at_risk=amount or 0,
-                resolved_at=now,
-            )
-        )
-        session.add(
-            _audit(
-                actor=AuditActor.SYSTEM,
-                action="recovery.escalated",
-                subscription_id=subscription_id,
-                recovery_action_id=action_id,
-            )
-        )
-
-    elif decision.action_type is ActionType.MARK_DEAD:
-        action.status = ActionStatus.EXECUTED
-        action.executed_at = now
-        result_status = ActionStatus.EXECUTED
-        session.add(
-            RecoveryOutcome(
-                subscription_id=subscription_id,
-                recovery_action_id=action_id,
-                triggering_payment_event_id=event_id,
-                outcome=OutcomeStatus.DEAD,
-                amount_at_risk=amount or 0,
-                resolved_at=now,
-            )
-        )
-        session.add(
-            _audit(
-                actor=AuditActor.SYSTEM,
-                action="recovery.mark_dead",
-                subscription_id=subscription_id,
-                recovery_action_id=action_id,
-            )
-        )
-
-    else:  # ActionType.SEND_PAYMENT_LINK — the externally-visible money move.
-        link_id, result_status = await _execute_payment_link(
-            session,
-            now=now,
-            client=client,
-            action_id=action_id,
-            subscription_id=subscription_id,
-            event_id=event_id,
-            amount=amount,
-            currency=currency,
-            rzp_sub_id=rzp_sub_id,
-        )
 
     # Mark the event handled and finalize (payment-link path already committed the
     # pre-execution audit; this commits the terminal state atomically).
@@ -418,26 +487,24 @@ async def run_recovery(
     return RecoveryResult(
         payment_event_id=event_id,
         diagnosis_category=dx.category,
-        action_type=decision.action_type,
-        guardrail_allowed=verdict.allowed,
-        guardrail_code=verdict.code.value,
-        action_status=result_status,
-        scheduled_at=(now + decision.delay)
-        if (verdict.allowed and decision.action_type is ActionType.RETRY_CHARGE and decision.delay)
-        else None,
-        razorpay_payment_link_id=link_id,
-        detail=decision.rationale,
+        action_type=applied.action_type,
+        guardrail_allowed=applied.verdict.allowed,
+        guardrail_code=applied.verdict.code.value,
+        action_status=applied.status,
+        scheduled_at=applied.scheduled_at,
+        razorpay_payment_link_id=applied.payment_link_id,
+        detail=applied.rationale,
     )
 
 
-async def _execute_payment_link(
+async def execute_payment_link(
     session: AsyncSession,
     *,
     now: datetime,
     client: RecoveryClient | None,
     action_id: uuid.UUID,
     subscription_id: uuid.UUID,
-    event_id: uuid.UUID,
+    event_id: uuid.UUID | None,
     amount: int | None,
     currency: str,
     rzp_sub_id: str,
