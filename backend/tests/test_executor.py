@@ -13,6 +13,7 @@ action / outcome / audit rows. The load-bearing cases:
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import httpx
 from sqlalchemy import select
@@ -71,11 +72,14 @@ async def _make_event(
     amount: int | None = 79900,
     currency: str = "INR",
     sub_status: str = "halted",
-    event_id: str = "evt_exec_1",
-    payment_id: str = "pay_exec_1",
-    rzp_sub_id: str = "sub_exec_1",
+    event_id: str | None = None,
+    payment_id: str | None = None,
+    rzp_sub_id: str | None = None,
     processing_status: EventProcessingStatus = EventProcessingStatus.PENDING,
 ) -> PaymentEvent:
+    event_id = event_id or f"evt_exec_{uuid4().hex}"
+    payment_id = payment_id or f"pay_exec_{uuid4().hex}"
+    rzp_sub_id = rzp_sub_id or f"sub_exec_{uuid4().hex}"
     payload = {
         "entity": "event",
         "account_id": "acc_TEST",
@@ -135,8 +139,12 @@ async def test_insufficient_funds_schedules_bounded_retry(db_session: AsyncSessi
     assert dx.category is DiagnosisCategory.INSUFFICIENT_FUNDS
     assert dx.reasoning  # the reasoning string is persisted
 
+    diagnosis = await db_session.scalar(
+        select(Diagnosis).where(Diagnosis.payment_event_id == event.id)
+    )
+    assert diagnosis is not None
     action = await db_session.scalar(
-        select(RecoveryAction).where(RecoveryAction.diagnosis_id == dx.id)
+        select(RecoveryAction).where(RecoveryAction.diagnosis_id == diagnosis.id)
     )
     assert action is not None
     assert action.status is ActionStatus.SCHEDULED
@@ -174,8 +182,12 @@ async def test_expired_card_creates_payment_link(db_session: AsyncSession) -> No
     assert len(client.calls) == 1
     assert client.calls[0]["amount"] == 50000
 
+    diagnosis = await db_session.scalar(
+        select(Diagnosis).where(Diagnosis.payment_event_id == event.id)
+    )
+    assert diagnosis is not None
     action = await db_session.scalar(
-        select(RecoveryAction).where(RecoveryAction.action_type == ActionType.SEND_PAYMENT_LINK)
+        select(RecoveryAction).where(RecoveryAction.diagnosis_id == diagnosis.id)
     )
     assert action is not None
     assert action.status is ActionStatus.EXECUTED
@@ -210,7 +222,9 @@ async def test_mandate_revoked_escalates_and_records_outcome(db_session: AsyncSe
     assert res.guardrail_allowed is True
     assert res.action_status is ActionStatus.EXECUTED
 
-    outcome = await db_session.scalar(select(RecoveryOutcome))
+    outcome = await db_session.scalar(
+        select(RecoveryOutcome).where(RecoveryOutcome.subscription_id == event.subscription_id)
+    )
     assert outcome is not None
     assert outcome.outcome is OutcomeStatus.ESCALATED
     assert outcome.amount_at_risk == 99900
@@ -236,7 +250,13 @@ async def test_guardrail_freezes_retry_when_subscription_cancelled(
     assert res.guardrail_code == GuardrailCode.POST_CANCELLATION_FREEZE.value
     assert res.action_status is ActionStatus.SKIPPED
 
-    action = await db_session.scalar(select(RecoveryAction))
+    diagnosis = await db_session.scalar(
+        select(Diagnosis).where(Diagnosis.payment_event_id == event.id)
+    )
+    assert diagnosis is not None
+    action = await db_session.scalar(
+        select(RecoveryAction).where(RecoveryAction.diagnosis_id == diagnosis.id)
+    )
     assert action is not None
     assert action.status is ActionStatus.SKIPPED
     assert action.error is not None
@@ -255,7 +275,13 @@ async def test_payment_link_failure_leaves_pre_execution_audit(db_session: Async
     assert res.action_status is ActionStatus.FAILED
     assert res.razorpay_payment_link_id is None
 
-    action = await db_session.scalar(select(RecoveryAction))
+    diagnosis = await db_session.scalar(
+        select(Diagnosis).where(Diagnosis.payment_event_id == event.id)
+    )
+    assert diagnosis is not None
+    action = await db_session.scalar(
+        select(RecoveryAction).where(RecoveryAction.diagnosis_id == diagnosis.id)
+    )
     assert action is not None
     assert action.status is ActionStatus.FAILED
     assert "simulated razorpay outage" in (action.error or "")
@@ -278,7 +304,13 @@ async def test_payment_link_deferred_without_client(db_session: AsyncSession) ->
     assert res.action_type is ActionType.SEND_PAYMENT_LINK
     assert res.action_status is ActionStatus.PLANNED
 
-    action = await db_session.scalar(select(RecoveryAction))
+    diagnosis = await db_session.scalar(
+        select(Diagnosis).where(Diagnosis.payment_event_id == event.id)
+    )
+    assert diagnosis is not None
+    action = await db_session.scalar(
+        select(RecoveryAction).where(RecoveryAction.diagnosis_id == diagnosis.id)
+    )
     assert action is not None
     assert action.status is ActionStatus.PLANNED
     assert "deferred" in (action.error or "")
@@ -297,7 +329,11 @@ async def test_retry_attempt_count_increments_across_events(db_session: AsyncSes
 
     # Same subscription, a later failure -> second retry backs off further.
     ev2 = await _make_event(
-        db_session, event_id="evt_2", payment_id="pay_2", error_description="insufficient funds"
+        db_session,
+        event_id="evt_2",
+        payment_id="pay_2",
+        rzp_sub_id=ev1.razorpay_subscription_id,
+        error_description="insufficient funds",
     )
     r2 = await run_recovery(db_session, ev2, now=NOW)
     assert r2.action_status is ActionStatus.SCHEDULED
@@ -305,7 +341,9 @@ async def test_retry_attempt_count_increments_across_events(db_session: AsyncSes
 
     actions = (
         await db_session.scalars(
-            select(RecoveryAction).order_by(RecoveryAction.attempt_number)
+            select(RecoveryAction)
+            .where(RecoveryAction.subscription_id == ev1.subscription_id)
+            .order_by(RecoveryAction.attempt_number)
         )
     ).all()
     assert [a.attempt_number for a in actions] == [1, 2]
@@ -326,4 +364,9 @@ async def test_already_processed_event_is_skipped(db_session: AsyncSession) -> N
     assert res.guardrail_code == "already_processed"
     assert res.action_status is ActionStatus.SKIPPED
     # Nothing was diagnosed or acted on.
-    assert await db_session.scalar(select(Diagnosis)) is None
+    assert (
+        await db_session.scalar(
+            select(Diagnosis).where(Diagnosis.payment_event_id == event.id)
+        )
+        is None
+    )

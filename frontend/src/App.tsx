@@ -1,54 +1,91 @@
 import { useEffect, useState } from "react";
 
-type Health = {
-  status: string;
-  app_env?: string;
-  database?: { connected: boolean; error?: string };
+type DashboardSummary = {
+  failed_payments: number;
+  amount_recovered_paise: number;
+  amount_at_risk_paise: number;
+  active_actions: number;
 };
 
 export default function App() {
-  const [health, setHealth] = useState<Health | null>(null);
+  const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch("/health")
+    fetch("/api/dashboard/summary")
       .then((r) => r.json())
-      .then(setHealth)
+      .then(setSummary)
       .catch((e) => setError(String(e)));
   }, []);
 
-  const connected = health?.database?.connected ?? false;
+  const formatMoney = (paise: number) =>
+    new Intl.NumberFormat("en-IN", {
+      style: "currency",
+      currency: "INR",
+      maximumFractionDigits: 0,
+    }).format(paise / 100);
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-slate-950 p-8 text-slate-100">
-      <div className="w-full max-w-lg space-y-6">
-        <header className="space-y-2">
-          <h1 className="text-3xl font-semibold tracking-tight">RecoverAI</h1>
-          <p className="text-slate-400">
-            Autonomous Razorpay subscription payment recovery. The recovery dashboard
-            arrives in a later phase.
-          </p>
+    <main className="min-h-screen bg-[#f4f1ea] text-[#1c2624]">
+      <div className="mx-auto max-w-6xl px-6 py-8 lg:px-10">
+        <header className="flex items-end justify-between border-b border-[#c9c6bc] pb-8">
+          <div>
+            <p className="mb-3 text-xs font-bold uppercase tracking-[0.25em] text-[#8a5a32]">
+              Revenue operations / live view
+            </p>
+            <h1 className="font-serif text-5xl leading-none tracking-tight">RecoverAI</h1>
+          </div>
+          <div className="hidden text-right text-sm text-[#65706a] sm:block">
+            <p>Razorpay subscriptions</p>
+            <p className="mt-1 flex items-center justify-end gap-2 text-xs uppercase tracking-widest">
+              <span className="h-2 w-2 rounded-full bg-[#4e8b70]" /> monitoring
+            </p>
+          </div>
         </header>
 
-        <div className="rounded-lg border border-slate-800 bg-slate-900 p-4">
-          <h2 className="mb-2 text-sm font-medium text-slate-400">Backend health</h2>
-          {error && <p className="text-sm text-red-400">Cannot reach backend: {error}</p>}
-          {!error && !health && <p className="text-sm text-slate-500">Checking…</p>}
-          {health && (
-            <div className="flex items-center gap-2">
-              <span
-                className={`inline-block h-2.5 w-2.5 rounded-full ${
-                  connected ? "bg-emerald-400" : "bg-amber-400"
-                }`}
-              />
-              <span className="text-sm">
-                status: <span className="font-mono">{health.status}</span> · db:{" "}
-                <span className="font-mono">{connected ? "connected" : "down"}</span>
-              </span>
+        <section className="py-12">
+          <div className="mb-7 flex items-baseline justify-between">
+            <h2 className="font-serif text-3xl">Recovery pulse</h2>
+            <span className="text-xs uppercase tracking-widest text-[#8b9188]">Today</span>
+          </div>
+          {error && (
+            <p className="border-l-2 border-[#a44635] bg-[#f9e6df] p-4 text-sm text-[#7d3326]">
+              Dashboard unavailable: {error}
+            </p>
+          )}
+          {!error && !summary && <p className="text-sm text-[#65706a]">Loading recovery data...</p>}
+          {summary && (
+            <div className="grid gap-px overflow-hidden border border-[#c9c6bc] bg-[#c9c6bc] sm:grid-cols-2 lg:grid-cols-4">
+              <Metric label="Failed payments" value={summary.failed_payments.toLocaleString("en-IN")} detail="Needs a decision" />
+              <Metric label="Recovered" value={formatMoney(summary.amount_recovered_paise)} detail="Confirmed revenue" accent />
+              <Metric label="Still at risk" value={formatMoney(summary.amount_at_risk_paise)} detail="Requires attention" warning />
+              <Metric label="Active actions" value={summary.active_actions.toLocaleString("en-IN")} detail="In the recovery queue" />
             </div>
           )}
+        </section>
+
+        <section className="grid gap-8 border-t border-[#c9c6bc] pt-8 lg:grid-cols-[1.4fr_1fr]">
+          <div>
+            <h3 className="mb-3 text-xs font-bold uppercase tracking-[0.2em] text-[#8a5a32]">Pipeline</h3>
+            <p className="max-w-xl font-serif text-2xl leading-snug">
+              Every intervention is bounded by policy, recorded before execution, and visible here.
+            </p>
+          </div>
+          <div className="border-l border-[#c9c6bc] pl-6 text-sm leading-6 text-[#65706a]">
+            The dashboard is connected to the aggregate recovery ledger. Detailed subscription and exception views will build on this same audit trail.
+          </div>
+        </section>
         </div>
-      </div>
-    </div>
+    </main>
+  );
+      }
+
+function Metric({ label, value, detail, accent, warning }: { label: string; value: string; detail: string; accent?: boolean; warning?: boolean }) {
+  return (
+    <article className="bg-[#fbfaf7] p-6">
+      <p className="text-xs uppercase tracking-widest text-[#65706a]">{label}</p>
+      <p className={`mt-8 font-serif text-3xl ${accent ? "text-[#367057]" : warning ? "text-[#a44635]" : ""}`}>{value}</p>
+      <p className="mt-2 text-xs text-[#8b9188]">{detail}</p>
+    </article>
   );
 }

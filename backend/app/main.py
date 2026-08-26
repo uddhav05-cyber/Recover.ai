@@ -15,6 +15,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
+from app.api.dashboard import router as dashboard_router
 from app.api.webhooks import router as webhook_router
 from app.config import get_settings
 from app.db.session import engine
@@ -35,6 +36,7 @@ app = FastAPI(
 )
 
 app.include_router(webhook_router)
+app.include_router(dashboard_router)
 
 
 @app.get("/")
