@@ -1,8 +1,7 @@
 """FastAPI application entrypoint.
 
-Exposes a root banner, a ``/health`` probe that pings the database, and the
-Razorpay webhook ingestion route (Phase 2). Later phases add the agent pipeline
-and dashboard APIs.
+Exposes the root banner, health probe, signed Razorpay webhook ingestion, and
+read-only dashboard APIs for the recovery funnel and operational metrics.
 """
 
 from __future__ import annotations
