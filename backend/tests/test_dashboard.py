@@ -17,3 +17,15 @@ async def test_dashboard_summary_contract(aclient: AsyncClient) -> None:
         "active_actions",
     }
     assert all(isinstance(value, int) for value in body.values())
+
+
+@pytest.mark.asyncio
+async def test_dashboard_overview_contract(aclient: AsyncClient) -> None:
+    response = await aclient.get("/api/dashboard/overview")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body) == {"funnel", "subscriptions", "exceptions"}
+    assert set(body["funnel"]) == {"failed", "actioned", "recovered"}
+    assert isinstance(body["subscriptions"], list)
+    assert isinstance(body["exceptions"], list)
