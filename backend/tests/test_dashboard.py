@@ -71,3 +71,19 @@ async def test_phase_six_dashboard_contracts(aclient: AsyncClient) -> None:
     assert exceptions_body["limit"] == 8
     assert exceptions_body["total"] >= len(exceptions_body["items"])
     assert len(exceptions_body["items"]) <= 8
+
+
+@pytest.mark.asyncio
+async def test_exception_filters_and_missing_audit_are_safe(aclient: AsyncClient) -> None:
+    filtered = await aclient.get(
+        "/api/exceptions?category=mandate_revoked&outcome=escalated&limit=8"
+    )
+    audit = await aclient.get("/api/exceptions/00000000-0000-0000-0000-000000000000/audit")
+
+    assert filtered.status_code == 200
+    filtered_body = filtered.json()
+    assert filtered_body["skip"] == 0
+    assert filtered_body["limit"] == 8
+    assert len(filtered_body["items"]) <= 8
+    assert audit.status_code == 200
+    assert audit.json() == {"items": [], "total": 0}

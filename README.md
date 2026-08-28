@@ -67,7 +67,9 @@ Useful endpoints:
 - `POST /api/auth/login` — local Firebase Auth stub for the demo
 - `GET /api/recovery-metrics` — dashboard funnel and recovery totals
 - `GET /api/subscriptions` — paginated subscription list
-- `GET /api/exceptions` — paginated unresolved recovery cases
+- `GET /api/exceptions` — paginated unresolved recovery cases; supports
+	`category` and `outcome` filters
+- `GET /api/exceptions/{outcome_id}/audit` — ordered audit trail for one case
 
 The frontend opens at the Vite URL shown by `npm run dev`. Use any email and
 password for the local auth stub; production authentication is reserved for
