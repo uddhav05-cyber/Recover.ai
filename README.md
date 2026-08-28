@@ -33,6 +33,16 @@ Start local Postgres from the repository root:
 docker compose up -d postgres
 ```
 
+To run the complete containerized stack instead, use:
+
+```powershell
+docker compose up --build
+```
+
+The dashboard is then available at `http://localhost:8080`, the API at
+`http://localhost:8000`, and migrations run automatically when the backend
+starts.
+
 Then configure the backend for the Compose database before running migrations:
 
 ```powershell
