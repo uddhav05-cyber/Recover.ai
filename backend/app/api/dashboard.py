@@ -4,18 +4,34 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import PaymentEvent, RecoveryAction, RecoveryOutcome, Subscription
+from app.db.models import (
+    Diagnosis,
+    PaymentEvent,
+    RecoveryAction,
+    RecoveryOutcome,
+    Subscription,
+)
 from app.db.session import get_session
-from app.enums import ActionStatus, OutcomeStatus
+from app.enums import ActionStatus, DiagnosisCategory, OutcomeStatus
+from app.schemas.dashboard import AuthLoginRequest, AuthLoginResponse
 
-router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
+router = APIRouter(prefix="/api", tags=["dashboard"])
 
 
-@router.get("/summary")
+@router.post("/auth/login")
+async def auth_login(request: AuthLoginRequest) -> AuthLoginResponse:
+    """Stub Firebase Auth: return a demo token."""
+    return AuthLoginResponse(
+        access_token=f"demo_token_{request.email.replace('@', '_')}",
+        user={"email": request.email, "name": request.email.split("@")[0]},
+    )
+
+
+@router.get("/dashboard/summary")
 async def summary(session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
     """Return the aggregate counters used by the first dashboard view."""
     failed_payments = await session.scalar(
@@ -47,7 +63,7 @@ async def summary(session: AsyncSession = Depends(get_session)) -> dict[str, Any
     }
 
 
-@router.get("/overview")
+@router.get("/dashboard/overview")
 async def overview(session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
     """Return the dashboard's funnel, recent subscriptions, and exceptions."""
     failed = await session.scalar(
@@ -102,3 +118,171 @@ async def overview(session: AsyncSession = Depends(get_session)) -> dict[str, An
             for outcome, subscription_id in exceptions
         ],
     }
+
+
+@router.get("/subscriptions")
+async def list_subscriptions(
+    session: AsyncSession = Depends(get_session),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
+) -> dict[str, Any]:
+    """List subscriptions with recovery status and pagination."""
+    stmt = select(Subscription).offset(skip).limit(limit)
+    rows = (await session.scalars(stmt)).all()
+
+    subscriptions_data: list[dict[str, Any]] = []
+    for sub in rows:
+        outcome = await session.scalar(
+            select(RecoveryOutcome)
+            .where(RecoveryOutcome.subscription_id == sub.id)
+            .order_by(RecoveryOutcome.resolved_at.desc())
+        )
+        recovery_status = outcome.outcome.value if outcome else "no_failures"
+
+        subscriptions_data.append(
+            {
+                "id": str(sub.id),
+                "razorpay_subscription_id": sub.razorpay_subscription_id,
+                "status": sub.status.value if sub.status else None,
+                "amount_paise": sub.amount or 0,
+                "currency": sub.currency,
+                "recovery_status": recovery_status,
+                "updated_at": sub.updated_at.isoformat(),
+            }
+        )
+
+    total = await session.scalar(select(func.count()).select_from(Subscription))
+    return {"items": subscriptions_data, "total": total, "skip": skip, "limit": limit}
+
+
+@router.get("/recovery-metrics")
+async def get_recovery_metrics(
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Get aggregate recovery metrics and funnel."""
+    total_subs = await session.scalar(select(func.count()).select_from(Subscription))
+    failed_events = await session.scalar(
+        select(func.count())
+        .select_from(PaymentEvent)
+        .where(PaymentEvent.event_type == "payment.failed")
+    )
+
+    recovered = await session.scalar(
+        select(func.count()).select_from(RecoveryOutcome).where(
+            RecoveryOutcome.outcome == OutcomeStatus.RECOVERED
+        )
+    )
+    escalated = await session.scalar(
+        select(func.count()).select_from(RecoveryOutcome).where(
+            RecoveryOutcome.outcome == OutcomeStatus.ESCALATED
+        )
+    )
+    dead = await session.scalar(
+        select(func.count()).select_from(RecoveryOutcome).where(
+            RecoveryOutcome.outcome == OutcomeStatus.DEAD
+        )
+    )
+    at_risk = await session.scalar(
+        select(func.count()).select_from(RecoveryOutcome).where(
+            RecoveryOutcome.outcome == OutcomeStatus.STILL_AT_RISK
+        )
+    )
+
+    amount_recovered = await session.scalar(
+        select(func.coalesce(func.sum(RecoveryOutcome.amount_recovered), 0)).where(
+            RecoveryOutcome.outcome == OutcomeStatus.RECOVERED
+        )
+    )
+    amount_at_risk = await session.scalar(
+        select(func.coalesce(func.sum(RecoveryOutcome.amount_at_risk), 0)).where(
+            RecoveryOutcome.outcome == OutcomeStatus.STILL_AT_RISK
+        )
+    )
+
+    total_recovered = int(recovered or 0)
+    recovery_rate = (total_recovered / int(failed_events or 1)) if failed_events else 0.0
+
+    return {
+        "total_subscriptions": int(total_subs or 0),
+        "failed_events": int(failed_events or 0),
+        "recovered_count": total_recovered,
+        "recovery_rate": recovery_rate,
+        "amount_recovered_paise": int(amount_recovered or 0),
+        "amount_at_risk_paise": int(amount_at_risk or 0),
+        "funnel": [
+            {"stage": "failed", "count": int(failed_events or 0), "amount_paise": 0},
+            {
+                "stage": "recovered",
+                "count": total_recovered,
+                "amount_paise": int(amount_recovered or 0),
+            },
+            {"stage": "escalated", "count": int(escalated or 0), "amount_paise": 0},
+            {"stage": "dead", "count": int(dead or 0), "amount_paise": 0},
+            {
+                "stage": "at_risk",
+                "count": int(at_risk or 0),
+                "amount_paise": int(amount_at_risk or 0),
+            },
+        ],
+    }
+
+
+@router.get("/exceptions")
+async def list_exceptions(
+    session: AsyncSession = Depends(get_session),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+) -> dict[str, Any]:
+    """List unresolved at-risk and escalated cases."""
+    stmt = (
+        select(RecoveryOutcome)
+        .where(
+            RecoveryOutcome.outcome.in_([OutcomeStatus.STILL_AT_RISK, OutcomeStatus.ESCALATED])
+        )
+        .order_by(RecoveryOutcome.resolved_at.desc())
+        .offset(skip)
+        .limit(limit)
+    )
+    outcomes = (await session.scalars(stmt)).all()
+
+    exceptions_data: list[dict[str, Any]] = []
+    for outcome in outcomes:
+        sub = await session.get(Subscription, outcome.subscription_id)
+        event = await session.get(PaymentEvent, outcome.triggering_payment_event_id)
+        action = await session.get(RecoveryAction, outcome.recovery_action_id)
+
+        category = DiagnosisCategory.OTHER
+        if action is not None:
+            diagnosis = await session.scalar(
+                select(Diagnosis)
+                .where(Diagnosis.subscription_id == outcome.subscription_id)
+                .order_by(Diagnosis.created_at.desc())
+            )
+            if diagnosis is not None:
+                category = diagnosis.category
+
+        last_action_detail = action.error or "pending" if action else "unknown"
+
+        exceptions_data.append(
+            {
+                "id": str(outcome.id),
+                "subscription_id": str(outcome.subscription_id),
+                "razorpay_subscription_id": sub.razorpay_subscription_id if sub else "unknown",
+                "category": category.value,
+                "outcome": outcome.outcome.value,
+                "amount_paise": event.amount or 0 if event else 0,
+                "amount_at_risk_paise": outcome.amount_at_risk,
+                "last_action_at": (
+                    action.executed_at.isoformat() if action and action.executed_at else None
+                ),
+                "last_action_detail": last_action_detail,
+            }
+        )
+
+    total = await session.scalar(
+        select(func.count()).select_from(RecoveryOutcome).where(
+            RecoveryOutcome.outcome.in_([OutcomeStatus.STILL_AT_RISK, OutcomeStatus.ESCALATED])
+        )
+    )
+
+    return {"items": exceptions_data, "total": total, "skip": skip, "limit": limit}
