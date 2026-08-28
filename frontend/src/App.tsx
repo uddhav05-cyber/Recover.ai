@@ -1,158 +1,62 @@
 import { useEffect, useState } from "react";
-import type { ReactNode } from "react";
 
-type DashboardSummary = {
-  failed_payments: number;
-  amount_recovered_paise: number;
-  amount_at_risk_paise: number;
-  active_actions: number;
-};
+type Metrics = { total_subscriptions: number; failed_events: number; recovered_count: number; recovery_rate: number; amount_recovered_paise: number; amount_at_risk_paise: number; funnel: Array<{ stage: string; count: number; amount_paise: number }> };
+type Subscription = { id: string; razorpay_subscription_id: string; status: string | null; amount_paise: number; currency: string; recovery_status: string; updated_at: string };
+type Exception = { id: string; razorpay_subscription_id: string; category: string; outcome: string; amount_at_risk_paise: number; last_action_detail: string };
 
-type DashboardOverview = {
-  funnel: { failed: number; actioned: number; recovered: number };
-  subscriptions: Array<{
-    id: string;
-    razorpay_subscription_id: string;
-    status: string;
-    amount_paise: number;
-    updated_at: string;
-  }>;
-  exceptions: Array<{
-    id: string;
-    subscription_id: string;
-    outcome: string;
-    amount_at_risk_paise: number;
-    resolved_at: string | null;
-  }>;
-};
+const money = (paise: number) => new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(paise / 100);
+async function getJson<T>(url: string): Promise<T> { const response = await fetch(url); if (!response.ok) throw new Error(`Request failed (${response.status})`); return response.json() as Promise<T>; }
 
 export default function App() {
-  const [summary, setSummary] = useState<DashboardSummary | null>(null);
-  const [overview, setOverview] = useState<DashboardOverview | null>(null);
+  const [email, setEmail] = useState(localStorage.getItem("recoverai_email") ?? "demo@recover.ai");
+  const [loggedIn, setLoggedIn] = useState(Boolean(localStorage.getItem("recoverai_token")));
+  const [password, setPassword] = useState("demo");
+  const [metrics, setMetrics] = useState<Metrics | null>(null);
+  const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
+  const [exceptions, setExceptions] = useState<Exception[]>([]);
+  const [subscriptionPage, setSubscriptionPage] = useState(0);
+  const [exceptionPage, setExceptionPage] = useState(0);
+  const [subscriptionTotal, setSubscriptionTotal] = useState(0);
+  const [exceptionTotal, setExceptionTotal] = useState(0);
+  const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const pageSize = 8;
 
   useEffect(() => {
-    Promise.all([
-      fetch("/api/dashboard/summary").then((r) => r.json()),
-      fetch("/api/dashboard/overview").then((r) => r.json()),
-    ])
-      .then(([nextSummary, nextOverview]) => {
-        setSummary(nextSummary);
-        setOverview(nextOverview);
-      })
-      .catch((e) => setError(String(e)));
-  }, []);
+    if (!loggedIn) return;
+    const load = async () => {
+      try {
+        const [nextMetrics, nextSubscriptions, nextExceptions] = await Promise.all([
+          getJson<Metrics>("/api/recovery-metrics"),
+          getJson<{ items: Subscription[]; total: number }>(`/api/subscriptions?skip=${subscriptionPage * pageSize}&limit=${pageSize}`),
+          getJson<{ items: Exception[]; total: number }>(`/api/exceptions?skip=${exceptionPage * pageSize}&limit=${pageSize}`),
+        ]);
+        setMetrics(nextMetrics); setSubscriptions(nextSubscriptions.items); setSubscriptionTotal(nextSubscriptions.total);
+        setExceptions(nextExceptions.items); setExceptionTotal(nextExceptions.total); setUpdatedAt(new Date()); setError(null);
+      } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to load dashboard"); }
+    };
+    void load(); const interval = window.setInterval(() => void load(), 30_000); return () => window.clearInterval(interval);
+  }, [loggedIn, subscriptionPage, exceptionPage]);
 
-  const formatMoney = (paise: number) =>
-    new Intl.NumberFormat("en-IN", {
-      style: "currency",
-      currency: "INR",
-      maximumFractionDigits: 0,
-    }).format(paise / 100);
+  const login = async (event: React.FormEvent) => {
+    event.preventDefault();
+    try {
+      const response = await fetch("/api/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email, password }) });
+      if (!response.ok) throw new Error("Login failed");
+      const data = (await response.json()) as { access_token: string };
+      localStorage.setItem("recoverai_token", data.access_token); localStorage.setItem("recoverai_email", email); setLoggedIn(true);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Login failed"); }
+  };
 
-  return (
-    <main className="min-h-screen bg-[#f4f1ea] text-[#1c2624]">
-      <div className="mx-auto max-w-6xl px-6 py-8 lg:px-10">
-        <header className="flex items-end justify-between border-b border-[#c9c6bc] pb-8">
-          <div>
-            <p className="mb-3 text-xs font-bold uppercase tracking-[0.25em] text-[#8a5a32]">
-              Revenue operations / live view
-            </p>
-            <h1 className="font-serif text-5xl leading-none tracking-tight">RecoverAI</h1>
-          </div>
-          <div className="hidden text-right text-sm text-[#65706a] sm:block">
-            <p>Razorpay subscriptions</p>
-            <p className="mt-1 flex items-center justify-end gap-2 text-xs uppercase tracking-widest">
-              <span className="h-2 w-2 rounded-full bg-[#4e8b70]" /> monitoring
-            </p>
-          </div>
-        </header>
+  if (!loggedIn) return <main className="flex min-h-screen items-center justify-center bg-[#f4f1ea] px-6 text-[#1c2624]"><form onSubmit={login} className="w-full max-w-sm border border-[#c9c6bc] bg-[#fbfaf7] p-8"><p className="text-xs font-bold uppercase tracking-[0.25em] text-[#8a5a32]">Revenue operations</p><h1 className="mt-4 font-serif text-5xl">RecoverAI</h1><p className="mt-3 text-sm leading-6 text-[#65706a]">Sign in to monitor bounded payment recovery actions.</p><label className="mt-8 block text-xs font-bold uppercase tracking-widest text-[#65706a]">Email<input className="mt-2 w-full border border-[#c9c6bc] bg-transparent p-3 text-sm outline-none focus:border-[#367057]" value={email} onChange={(event) => setEmail(event.target.value)} type="email" required /></label><label className="mt-4 block text-xs font-bold uppercase tracking-widest text-[#65706a]">Password<input className="mt-2 w-full border border-[#c9c6bc] bg-transparent p-3 text-sm outline-none focus:border-[#367057]" value={password} onChange={(event) => setPassword(event.target.value)} type="password" required /></label><button className="mt-6 w-full bg-[#1c2624] p-3 text-xs font-bold uppercase tracking-widest text-[#fbfaf7]" type="submit">Enter dashboard</button></form></main>;
 
-        <section className="py-12">
-          <div className="mb-7 flex items-baseline justify-between">
-            <h2 className="font-serif text-3xl">Recovery pulse</h2>
-            <span className="text-xs uppercase tracking-widest text-[#8b9188]">Today</span>
-          </div>
-          {error && (
-            <p className="border-l-2 border-[#a44635] bg-[#f9e6df] p-4 text-sm text-[#7d3326]">
-              Dashboard unavailable: {error}
-            </p>
-          )}
-          {!error && !summary && <p className="text-sm text-[#65706a]">Loading recovery data...</p>}
-          {summary && (
-            <div className="grid gap-px overflow-hidden border border-[#c9c6bc] bg-[#c9c6bc] sm:grid-cols-2 lg:grid-cols-4">
-              <Metric label="Failed payments" value={summary.failed_payments.toLocaleString("en-IN")} detail="Needs a decision" />
-              <Metric label="Recovered" value={formatMoney(summary.amount_recovered_paise)} detail="Confirmed revenue" accent />
-              <Metric label="Still at risk" value={formatMoney(summary.amount_at_risk_paise)} detail="Requires attention" warning />
-              <Metric label="Active actions" value={summary.active_actions.toLocaleString("en-IN")} detail="In the recovery queue" />
-            </div>
-          )}
-        </section>
-
-        {overview && <>
-          <section className="border-t border-[#c9c6bc] py-10">
-            <div className="mb-6 flex items-baseline justify-between">
-              <h2 className="font-serif text-3xl">Recovery funnel</h2>
-              <span className="text-xs uppercase tracking-widest text-[#8b9188]">All recorded events</span>
-            </div>
-            <div className="grid gap-4 sm:grid-cols-3">
-              <FunnelStep label="Failed" value={overview.funnel.failed} />
-              <FunnelStep label="Actioned" value={overview.funnel.actioned} />
-              <FunnelStep label="Recovered" value={overview.funnel.recovered} accent />
-            </div>
-          </section>
-
-          <section className="grid gap-10 border-t border-[#c9c6bc] py-10 lg:grid-cols-[1.4fr_1fr]">
-            <DataTable title="Subscriptions" empty={overview.subscriptions.length === 0}>
-              {overview.subscriptions.map((subscription) => <div className="grid grid-cols-[1.4fr_1fr_auto] items-center gap-3 border-b border-[#dedbd2] py-4 text-sm" key={subscription.id}>
-                <span className="font-mono text-xs">{subscription.razorpay_subscription_id}</span>
-                <Status status={subscription.status} />
-                <span className="text-right text-[#65706a]">{formatMoney(subscription.amount_paise)}</span>
-              </div>)}
-            </DataTable>
-            <DataTable title="Exceptions" empty={overview.exceptions.length === 0}>
-              {overview.exceptions.map((exception) => <div className="border-b border-[#dedbd2] py-4" key={exception.id}>
-                <div className="flex items-center justify-between gap-3 text-sm"><span className="font-mono text-xs">{exception.subscription_id}</span><Status status={exception.outcome} /></div>
-                <p className="mt-2 text-xs text-[#a44635]">{formatMoney(exception.amount_at_risk_paise)} at risk</p>
-              </div>)}
-            </DataTable>
-          </section>
-        </>}
-
-        <section className="grid gap-8 border-t border-[#c9c6bc] pt-8 lg:grid-cols-[1.4fr_1fr]">
-          <div>
-            <h3 className="mb-3 text-xs font-bold uppercase tracking-[0.2em] text-[#8a5a32]">Pipeline</h3>
-            <p className="max-w-xl font-serif text-2xl leading-snug">
-              Every intervention is bounded by policy, recorded before execution, and visible here.
-            </p>
-          </div>
-          <div className="border-l border-[#c9c6bc] pl-6 text-sm leading-6 text-[#65706a]">
-            The dashboard is connected to the aggregate recovery ledger. Detailed subscription and exception views will build on this same audit trail.
-          </div>
-        </section>
-        </div>
-    </main>
-  );
-      }
-
-function Metric({ label, value, detail, accent, warning }: { label: string; value: string; detail: string; accent?: boolean; warning?: boolean }) {
-  return (
-    <article className="bg-[#fbfaf7] p-6">
-      <p className="text-xs uppercase tracking-widest text-[#65706a]">{label}</p>
-      <p className={`mt-8 font-serif text-3xl ${accent ? "text-[#367057]" : warning ? "text-[#a44635]" : ""}`}>{value}</p>
-      <p className="mt-2 text-xs text-[#8b9188]">{detail}</p>
-    </article>
-  );
+  return <main className="min-h-screen bg-[#f4f1ea] text-[#1c2624]"><div className="mx-auto max-w-7xl px-5 py-7 lg:px-10"><header className="flex items-end justify-between border-b border-[#c9c6bc] pb-7"><div><p className="mb-3 text-xs font-bold uppercase tracking-[0.25em] text-[#8a5a32]">Revenue operations / live view</p><h1 className="font-serif text-5xl leading-none">RecoverAI</h1></div><div className="text-right text-sm text-[#65706a]"><p>{email}</p><p className="mt-2 flex items-center justify-end gap-2 text-xs uppercase tracking-widest"><span className="h-2 w-2 rounded-full bg-[#4e8b70]" /> monitoring</p></div></header>
+  <section className="py-10"><div className="mb-6 flex items-baseline justify-between"><h2 className="font-serif text-3xl">Recovery pulse</h2><span className="text-xs uppercase tracking-widest text-[#8b9188]">{updatedAt ? `Updated ${updatedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "Loading"}</span></div>{error && <p className="mb-5 border-l-2 border-[#a44635] bg-[#f9e6df] p-4 text-sm text-[#7d3326]">Dashboard unavailable: {error}</p>}<div className="grid gap-px overflow-hidden border border-[#c9c6bc] bg-[#c9c6bc] sm:grid-cols-2 lg:grid-cols-4"><Metric label="Subscriptions" value={metrics?.total_subscriptions.toLocaleString("en-IN") ?? "--"} detail="Tracked accounts" /><Metric label="Recovered" value={metrics ? money(metrics.amount_recovered_paise) : "--"} detail={metrics ? `${(metrics.recovery_rate * 100).toFixed(1)}% recovery rate` : "Confirmed revenue"} accent /><Metric label="Still at risk" value={metrics ? money(metrics.amount_at_risk_paise) : "--"} detail="Requires attention" warning /><Metric label="Failed events" value={metrics?.failed_events.toLocaleString("en-IN") ?? "--"} detail="Awaiting resolution" /></div></section>
+  <section className="border-t border-[#c9c6bc] py-9"><div className="mb-6 flex items-baseline justify-between"><h2 className="font-serif text-3xl">Recovery funnel</h2><span className="text-xs uppercase tracking-widest text-[#8b9188]">All recorded events</span></div><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">{metrics?.funnel.map((step) => <FunnelStep key={step.stage} label={step.stage} value={step.count} amount={step.amount_paise} accent={step.stage === "recovered"} />) ?? <p className="text-sm text-[#65706a]">Loading funnel...</p>}</div></section>
+  <section className="grid gap-10 border-t border-[#c9c6bc] py-9 lg:grid-cols-[1.4fr_1fr]"><DataTable title="Subscriptions" page={subscriptionPage} total={subscriptionTotal} pageSize={pageSize} onPage={setSubscriptionPage} empty={!subscriptions.length}>{subscriptions.map((subscription) => <div className="grid grid-cols-[1.5fr_1fr_auto] items-center gap-3 border-b border-[#dedbd2] py-4 text-sm" key={subscription.id}><span className="font-mono text-xs">{subscription.razorpay_subscription_id}</span><Status status={subscription.recovery_status || subscription.status || "unknown"} /><span className="text-right text-[#65706a]">{money(subscription.amount_paise)}</span></div>)}</DataTable><DataTable title="Exceptions" page={exceptionPage} total={exceptionTotal} pageSize={pageSize} onPage={setExceptionPage} empty={!exceptions.length}>{exceptions.map((exception) => <div className="border-b border-[#dedbd2] py-4" key={exception.id}><div className="flex items-center justify-between gap-3 text-sm"><span className="font-mono text-xs">{exception.razorpay_subscription_id}</span><Status status={exception.outcome} /></div><div className="mt-2 flex justify-between gap-3 text-xs text-[#a44635]"><span>{exception.category.replaceAll("_", " ")}</span><span>{money(exception.amount_at_risk_paise)} at risk</span></div><p className="mt-2 truncate text-xs text-[#65706a]">{exception.last_action_detail}</p></div>)}</DataTable></section><footer className="border-t border-[#c9c6bc] pt-7 text-sm text-[#65706a]">Every intervention is policy-gated, recorded before execution, and visible in this recovery ledger.</footer></div></main>;
 }
 
-function FunnelStep({ label, value, accent }: { label: string; value: number; accent?: boolean }) {
-  return <div className="border-l-2 border-[#c9c6bc] bg-[#fbfaf7] p-5"><p className="text-xs uppercase tracking-widest text-[#65706a]">{label}</p><p className={`mt-5 font-serif text-4xl ${accent ? "text-[#367057]" : ""}`}>{value.toLocaleString("en-IN")}</p></div>;
-}
-
-function DataTable({ title, empty, children }: { title: string; empty: boolean; children: ReactNode }) {
-  return <div><div className="mb-2 flex items-center justify-between"><h3 className="text-xs font-bold uppercase tracking-[0.2em] text-[#8a5a32]">{title}</h3><span className="text-xs text-[#8b9188]">Latest 20</span></div>{empty ? <p className="border border-dashed border-[#c9c6bc] p-5 text-sm text-[#65706a]">Nothing recorded yet.</p> : <div>{children}</div>}</div>;
-}
-
-function Status({ status }: { status: string }) {
-  return <span className="text-xs uppercase tracking-wider text-[#65706a]">{status.replaceAll("_", " ")}</span>;
-}
+function Metric({ label, value, detail, accent, warning }: { label: string; value: string; detail: string; accent?: boolean; warning?: boolean }) { return <article className="bg-[#fbfaf7] p-6"><p className="text-xs uppercase tracking-widest text-[#65706a]">{label}</p><p className={`mt-8 font-serif text-3xl ${accent ? "text-[#367057]" : warning ? "text-[#a44635]" : ""}`}>{value}</p><p className="mt-2 text-xs text-[#8b9188]">{detail}</p></article>; }
+function FunnelStep({ label, value, amount, accent }: { label: string; value: number; amount: number; accent?: boolean }) { return <div className="border-l-2 border-[#c9c6bc] bg-[#fbfaf7] p-5"><p className="text-xs uppercase tracking-widest text-[#65706a]">{label.replaceAll("_", " ")}</p><p className={`mt-5 font-serif text-4xl ${accent ? "text-[#367057]" : ""}`}>{value.toLocaleString("en-IN")}</p>{amount > 0 && <p className="mt-2 text-xs text-[#8b9188]">{money(amount)}</p>}</div>; }
+function DataTable({ title, empty, children, page, total, pageSize, onPage }: { title: string; empty: boolean; children: React.ReactNode; page: number; total: number; pageSize: number; onPage: (page: number) => void }) { const pages = Math.max(1, Math.ceil(total / pageSize)); return <div><div className="mb-2 flex items-center justify-between"><h3 className="text-xs font-bold uppercase tracking-[0.2em] text-[#8a5a32]">{title}</h3><span className="text-xs text-[#8b9188]">{total} total</span></div>{empty ? <p className="border border-dashed border-[#c9c6bc] p-5 text-sm text-[#65706a]">Nothing recorded yet.</p> : <>{children}<div className="mt-4 flex items-center justify-between text-xs text-[#65706a]"><button disabled={page === 0} onClick={() => onPage(page - 1)} className="disabled:opacity-30" type="button">Previous</button><span>{page + 1} / {pages}</span><button disabled={page + 1 >= pages} onClick={() => onPage(page + 1)} className="disabled:opacity-30" type="button">Next</button></div></>}</div>; }
+function Status({ status }: { status: string }) { return <span className="text-xs uppercase tracking-wider text-[#65706a]">{status.replaceAll("_", " ")}</span>; }
