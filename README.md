@@ -3,6 +3,59 @@
 RecoverAI detects failed Razorpay subscription payments, applies bounded recovery
 actions, and records the full decision trail.
 
+## Architecture
+
+```mermaid
+flowchart LR
+	R[Razorpay webhook] --> I[Signature validation + idempotent ingestion]
+	I --> D[Diagnose: rules first]
+	D --> P[Decide: explicit policy]
+	P --> G[Guardrail: deterministic gate]
+	G --> A[Act: retry or payment link]
+	A --> W[Delayed retry worker]
+	D --> DB[(Postgres audit trail)]
+	G --> DB
+	A --> DB
+	DB --> V[React dashboard]
+```
+
+Every automated recovery action is persisted and audited before an external
+payment call. The LLM can provide an ambiguous diagnosis, but it cannot bypass
+the policy or guardrail.
+
+## Local Setup
+
+Requirements: Python 3.13, Node.js 20+, and a reachable PostgreSQL database.
+
+```powershell
+cd backend
+py -3.13 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -e ".[dev]"
+Copy-Item .env.example .env
+alembic upgrade head
+uvicorn app.main:app --reload
+```
+
+In a second terminal:
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+The frontend proxies `/health` and `/api` to FastAPI on port 8000. Razorpay
+credentials must be test-mode values and are only needed for live integration
+actions; the synthetic batch uses a simulated client.
+
+Useful endpoints:
+
+- `GET /health` — application and database liveness
+- `POST /webhooks/razorpay` — signed webhook ingestion
+- `GET /api/dashboard/summary` — aggregate recovery metrics
+- `GET /api/dashboard/overview` — funnel, subscriptions, and exceptions
+
 ## Phase 5: Synthetic Measurement
 
 Run the deterministic demo batch from `backend/`:
@@ -21,3 +74,11 @@ Baseline result from the 60-case batch:
 
 The batch uses a simulated Razorpay client. It exercises Diagnose -> Decide ->
 Guardrail -> Act and the due-retry worker without making live payment calls.
+
+## What I'd Build Next
+
+- Add authenticated merchant access with Firebase Auth.
+- Add pagination and filters for subscription and exception views.
+- Replace the simulated batch client with a recorded Razorpay test-mode fixture
+	for repeatable integration demos.
+- Add deployment configuration for Cloud Run, Cloud SQL, and a managed worker.
