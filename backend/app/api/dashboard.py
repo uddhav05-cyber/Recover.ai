@@ -128,18 +128,18 @@ async def list_subscriptions(
     limit: int = Query(20, ge=1, le=100),
 ) -> dict[str, Any]:
     """List subscriptions with recovery status and pagination."""
-    stmt = select(Subscription).offset(skip).limit(limit)
-    rows = (await session.scalars(stmt)).all()
+    latest_outcome = (
+        select(RecoveryOutcome.outcome)
+        .where(RecoveryOutcome.subscription_id == Subscription.id)
+        .order_by(RecoveryOutcome.resolved_at.desc().nullslast(), RecoveryOutcome.created_at.desc())
+        .limit(1)
+        .scalar_subquery()
+    )
+    stmt = select(Subscription, latest_outcome.label("recovery_status")).offset(skip).limit(limit)
+    rows = (await session.execute(stmt)).all()
 
     subscriptions_data: list[dict[str, Any]] = []
-    for sub in rows:
-        outcome = await session.scalar(
-            select(RecoveryOutcome)
-            .where(RecoveryOutcome.subscription_id == sub.id)
-            .order_by(RecoveryOutcome.resolved_at.desc())
-        )
-        recovery_status = outcome.outcome.value if outcome else "no_failures"
-
+    for sub, recovery_status in rows:
         subscriptions_data.append(
             {
                 "id": str(sub.id),
@@ -147,7 +147,7 @@ async def list_subscriptions(
                 "status": sub.status.value if sub.status else None,
                 "amount_paise": sub.amount or 0,
                 "currency": sub.currency,
-                "recovery_status": recovery_status,
+                "recovery_status": recovery_status.value if recovery_status else "no_failures",
                 "updated_at": sub.updated_at.isoformat(),
             }
         )
@@ -239,9 +239,22 @@ async def list_exceptions(
     """List unresolved cases, optionally filtered by category or outcome."""
     exception_outcomes = [OutcomeStatus.STILL_AT_RISK, OutcomeStatus.ESCALATED]
     stmt = (
-        select(RecoveryOutcome)
+        select(
+            RecoveryOutcome,
+            Subscription.razorpay_subscription_id,
+            PaymentEvent.amount,
+            RecoveryAction.executed_at,
+            RecoveryAction.error,
+            Diagnosis.category,
+        )
+        .join(Subscription, Subscription.id == RecoveryOutcome.subscription_id)
         .join(RecoveryAction, RecoveryAction.id == RecoveryOutcome.recovery_action_id, isouter=True)
         .join(Diagnosis, Diagnosis.id == RecoveryAction.diagnosis_id, isouter=True)
+        .join(
+            PaymentEvent,
+            PaymentEvent.id == RecoveryOutcome.triggering_payment_event_id,
+            isouter=True,
+        )
         .where(
             RecoveryOutcome.outcome == outcome_filter
             if outcome_filter is not None
@@ -253,39 +266,25 @@ async def list_exceptions(
     )
     if category is not None:
         stmt = stmt.where(Diagnosis.category == category)
-    outcomes = (await session.scalars(stmt)).all()
+    rows = (await session.execute(stmt)).all()
 
     exceptions_data: list[dict[str, Any]] = []
-    for recovery_outcome in outcomes:
-        sub = await session.get(Subscription, recovery_outcome.subscription_id)
-        event = await session.get(PaymentEvent, recovery_outcome.triggering_payment_event_id)
-        action = await session.get(RecoveryAction, recovery_outcome.recovery_action_id)
-
-        category = DiagnosisCategory.OTHER
-        if action is not None:
-            diagnosis = await session.scalar(
-                select(Diagnosis)
-                .where(Diagnosis.subscription_id == recovery_outcome.subscription_id)
-                .order_by(Diagnosis.created_at.desc())
-            )
-            if diagnosis is not None:
-                category = diagnosis.category
-
-        last_action_detail = action.error or "pending" if action else "unknown"
+    for recovery_outcome, subscription_id, amount, executed_at, action_error, category in rows:
+        category = category or DiagnosisCategory.OTHER
 
         exceptions_data.append(
             {
                 "id": str(recovery_outcome.id),
                 "subscription_id": str(recovery_outcome.subscription_id),
-                "razorpay_subscription_id": sub.razorpay_subscription_id if sub else "unknown",
+                "razorpay_subscription_id": subscription_id,
                 "category": category.value,
                 "outcome": recovery_outcome.outcome.value,
-                "amount_paise": event.amount or 0 if event else 0,
+                "amount_paise": amount or 0,
                 "amount_at_risk_paise": recovery_outcome.amount_at_risk,
                 "last_action_at": (
-                    action.executed_at.isoformat() if action and action.executed_at else None
+                    executed_at.isoformat() if executed_at else None
                 ),
-                "last_action_detail": last_action_detail,
+                "last_action_detail": action_error or "pending",
             }
         )
 
