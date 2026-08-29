@@ -1,0 +1,41 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: recoverai-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: recoverai
+      POSTGRES_USER: recoverai
+      POSTGRES_PASSWORD: recoverai
+    ports:
+      - "5432:5432"
+    volumes:
+      - recoverai-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U recoverai -d recoverai"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+    environment:
+      DATABASE_URL: postgresql+asyncpg://recoverai:recoverai@postgres:5432/recoverai
+      APP_ENV: docker
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+
+  frontend:
+    build:
+      context: ./frontend
+    depends_on:
+      - backend
+    ports:
+      - "8080:80"
+
+volumes:
+  recoverai-postgres:
