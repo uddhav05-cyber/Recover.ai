@@ -8,8 +8,8 @@ const money = (paise: number) => new Intl.NumberFormat("en-IN", { style: "curren
 async function getJson<T>(url: string): Promise<T> { const response = await fetch(url); if (!response.ok) throw new Error(`Request failed (${response.status})`); return response.json() as Promise<T>; }
 
 export default function App() {
-  const [email, setEmail] = useState(localStorage.getItem("recoverai_email") ?? "demo@recover.ai");
-  const [loggedIn, setLoggedIn] = useState(Boolean(localStorage.getItem("recoverai_token")));
+  const [email, setEmail] = useState(sessionStorage.getItem("recoverai_email") ?? "demo@recover.ai");
+  const [loggedIn, setLoggedIn] = useState(Boolean(sessionStorage.getItem("recoverai_token")));
   const [password, setPassword] = useState("demo");
   const [metrics, setMetrics] = useState<Metrics | null>(null);
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
@@ -46,7 +46,8 @@ export default function App() {
       const response = await fetch("/api/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email, password }) });
       if (!response.ok) throw new Error("Login failed");
       const data = (await response.json()) as { access_token: string };
-      localStorage.setItem("recoverai_token", data.access_token); localStorage.setItem("recoverai_email", email); setLoggedIn(true);
+      sessionStorage.setItem("recoverai_token", data.access_token); sessionStorage.setItem("recoverai_email", email);
+      localStorage.removeItem("recoverai_token"); localStorage.removeItem("recoverai_email"); setLoggedIn(true);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Login failed"); }
   };
 
