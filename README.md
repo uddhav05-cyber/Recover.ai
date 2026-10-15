@@ -44,7 +44,15 @@ Seed `20260826`, 60 generated cases:
 
 The batch uses a simulated Razorpay client. These numbers demonstrate the pipeline and its stopping rules, not real-world recovery rates.
 
-Category breakdown will be reported by the batch runner as recovered and at-risk counts and amounts.
+Category breakdown from the same run:
+
+| Failure category | Recovered | At risk |
+|---|---:|---:|
+| Insufficient funds | 7/12, Rs 5,193.00 | 5/12, Rs 4,095.00 |
+| Expired or invalid card | 0/12, Rs 0.00 | 12/12, Rs 9,988.00 |
+| Bank or gateway error | 7/12, Rs 5,693.00 | 5/12, Rs 4,795.00 |
+| Mandate revoked | 0/12, Rs 0.00 | 12/12, Rs 10,188.00 |
+| Other | 0/12, Rs 0.00 | 12/12, Rs 8,288.00 |
 
 ## Quick Start (Docker)
 

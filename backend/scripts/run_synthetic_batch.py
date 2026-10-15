@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -105,19 +106,52 @@ async def run_batch(cases: list[SyntheticCase]) -> list[SyntheticResult]:
         return results
 
 
-def print_report(metrics: Any) -> None:
+def print_report(metrics: Any, results: list[SyntheticResult]) -> None:
     print(f"Cases processed: {metrics.total_cases}")
     print(f"Recovered:       {metrics.recovered_cases} ({metrics.recovery_rate:.1%})")
     print(f"Amount recovered: Rs {metrics.amount_recovered / 100:,.2f}")
     print(f"Still at risk:    Rs {metrics.amount_at_risk / 100:,.2f}")
     print(f"Exceptions:       {len(metrics.exceptions)}")
+
+    print("No-action baseline: 0 recovered (0.0%)")
+    print("No-action amount recovered: Rs 0.00")
+    total_amount = sum(result.case.amount for result in results)
+    print(f"No-action amount at risk: Rs {total_amount / 100:,.2f}")
+
+    category_totals: dict[str, dict[str, int]] = defaultdict(
+        lambda: {
+            "cases": 0,
+            "recovered": 0,
+            "at_risk": 0,
+            "recovered_amount": 0,
+            "at_risk_amount": 0,
+        }
+    )
+    for result in results:
+        totals = category_totals[result.case.category.value]
+        totals["cases"] += 1
+        if result.outcome is SyntheticOutcome.RECOVERED:
+            totals["recovered"] += 1
+            totals["recovered_amount"] += result.case.amount
+        else:
+            totals["at_risk"] += 1
+            totals["at_risk_amount"] += result.case.amount
+
+    print("By failure category:")
+    for category, totals in category_totals.items():
+        print(
+            f"- {category}: {totals['recovered']}/{totals['cases']} recovered "
+            f"(Rs {totals['recovered_amount'] / 100:,.2f}); "
+            f"{totals['at_risk']} at risk (Rs {totals['at_risk_amount'] / 100:,.2f})"
+        )
+
     for exception in metrics.exceptions:
         print(f"- {exception.case.case_id}: {exception.outcome.value} - {exception.detail}")
 
 
 async def main(count: int, seed: int) -> None:
     results = await run_batch(generate_cases(count, seed=seed))
-    print_report(measure_results(results))
+    print_report(measure_results(results), results)
 
 
 if __name__ == "__main__":
