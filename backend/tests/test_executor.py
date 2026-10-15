@@ -64,6 +64,30 @@ class _FakeClient:
         return self.response
 
 
+class _AuditObservingClient:
+    """Simulated client that records audit actions visible at call time."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+        self.audit_actions_at_call: list[str] = []
+
+    async def create_payment_link(
+        self,
+        *,
+        amount: int,
+        currency: str = "INR",
+        description: str | None = None,
+        customer: dict[str, object] | None = None,
+        notes: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        action_id = notes["recovery_action_id"] if notes else None
+        actions = await self.session.scalars(
+            select(AuditLog.action).where(AuditLog.recovery_action_id == action_id)
+        )
+        self.audit_actions_at_call = list(actions)
+        return {"id": "plink_ordered", "short_url": "https://rzp.io/i/ordered"}
+
+
 async def _make_event(
     session: AsyncSession,
     *,
@@ -294,6 +318,16 @@ async def test_payment_link_failure_leaves_pre_execution_audit(db_session: Async
     # The "requested" row was committed before the (failing) call — durable intent.
     assert "razorpay.payment_link.requested" in audit_actions
     assert "razorpay.payment_link.failed" in audit_actions
+
+
+async def test_audit_is_visible_before_payment_client_call(db_session: AsyncSession) -> None:
+    event = await _make_event(db_session, error_description="the card is expired", amount=12345)
+    client = _AuditObservingClient(db_session)
+
+    res = await run_recovery(db_session, event, now=NOW, client=client)
+
+    assert res.action_status is ActionStatus.EXECUTED
+    assert "razorpay.payment_link.requested" in client.audit_actions_at_call
 
 
 async def test_payment_link_deferred_without_client(db_session: AsyncSession) -> None:
