@@ -1,24 +1,19 @@
 # RecoverAI
 
-AI-assisted recovery agent for failed Razorpay subscription payments.
-**Diagnose (LLM) → Decide (policy) → Guardrail (deterministic gate) → Act.**
-Every automated action is persisted and audited *before* an external payment call — the LLM can inform a diagnosis, but it can never bypass the policy or the guardrail.
+[![CI](https://github.com/uddhav05-cyber/Recover.ai/actions/workflows/ci.yml/badge.svg)](https://github.com/uddhav05-cyber/Recover.ai/actions/workflows/ci.yml)
 
-<!-- [ ] Optional: add a static screenshot of the dashboard here once you have one.
-     ![dashboard](docs/dashboard.png)
-     Not required to publish — the written example below carries the pitch on its own. -->
+RecoverAI is an auditable FastAPI and React agent for bounded recovery of failed Razorpay subscription payments.
+
+**What:** Diagnose failed payments, choose a policy-approved recovery action, and record the complete episode.
+**Why:** Blind retry schedules waste attempts and give an LLM too much power over money-moving operations.
+**Result:** A deterministic guardrail gates every action, with an audit record written before external payment calls.
+
+![RecoverAI dashboard screenshot](docs/screenshots/dashboard.png)
 
 ## The problem
 
-Failed subscription payments are usually handled with a blind, fixed retry schedule (day 1, day 3, day 7) regardless of *why* the payment failed. A card declined for "insufficient funds" behaves nothing like one declined for an unclear issuer-side reason — but naive retry treats them identically, wasting attempts on cases that were never recoverable and silently losing revenue on ones that were.
+Failed subscription payments are usually handled with a fixed retry schedule regardless of why the payment failed. RecoverAI classifies the failure, applies an explicit policy, and routes only bounded, explainable actions toward execution.
 
-## Why Diagnose and Decide are separate steps
-
-RecoverAI's Diagnose step uses an LLM to classify ambiguous decline reasons — raw gateway responses are often generic strings with no structured recoverability signal — into **recoverable now**, **recoverable later**, or **dead**.
-
-The LLM's diagnosis is advisory only. The Decide step applies an explicit, human-authored policy to that diagnosis, and the Guardrail step is a separate, deterministic gate that checks confidence and policy compliance before *anything* is allowed to reach the Act step. If the LLM is uncertain, or its suggested action falls outside policy, the case is routed to a manual exception queue instead of acted on automatically. This is the part of the system that matters most: it's what stops a bad LLM call from ever triggering a real payment action.
-
-**Example case** 
 ## Architecture
 
 ```
@@ -35,115 +30,136 @@ flowchart LR
 	DB --> V[React dashboard]
 ```
 
-## Results (synthetic batch, seed 20260826, n=60)
+## Results (Simulated Data)
 
-| | RecoverAI | Naive fixed-schedule retry |
-|---|---|---|
+Seed `20260826`, 60 generated cases:
+
+| Metric | RecoverAI | No-action baseline |
+|---|---:|---:|
 | Cases processed | 60 | 60 |
-| Recovered | 14 (23.3%) | `[ ]` — run the same seed through a fixed-schedule retry with no diagnosis step and log this |
-| Amount recovered | Rs 10,886.00 | `[ ]` |
-| Still at risk | Rs 37,354.00 | `[ ]` |
-| Exceptions correctly triaged for manual review | 46 | 0 — naive retry has no triage step |
+| Recovered | 14 (23.3%) | 0 (0.0%) |
+| Amount recovered | Rs 10,886.00 | Rs 0.00 |
+| Still at risk | Rs 37,354.00 | Rs 48,240.00 |
+| Exceptions | 46 | 60 |
 
-The batch uses a simulated Razorpay client and exercises Diagnose → Decide → Guardrail → Act plus the due-retry worker without making live payment calls.
+The batch uses a simulated Razorpay client. These numbers demonstrate the pipeline and its stopping rules, not real-world recovery rates.
 
-*If you don't fill in the baseline column, drop the second column and state the RecoverAI numbers on their own — but know that an unanchored percentage reads as unremarkable even when the underlying result is good. The comparison is 20 minutes of scripting against your existing synthetic client and is the highest-leverage addition to this file.*
+Category breakdown will be reported by the batch runner as recovered and at-risk counts and amounts.
 
-## Local Setup
+## Quick Start (Docker)
 
-Requirements: Python 3.13 and Node.js 20+. Docker Desktop is optional.
+Requirements: Docker Desktop or Docker Engine with Compose.
 
-### Windows Without Docker
+From the repository root:
 
-The development environment can use the configured hosted Postgres database, so Docker is not needed for a local dashboard demo. From the repository root, run the backend setup once:
-
-```
-cd backend
-py -3.13 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -e ".[dev]"
-alembic upgrade head
-cd ..
-.\scripts\start-local.ps1
-```
-
-Open `http://localhost:8080`. The launcher starts FastAPI on port 8000 and Vite on port 8080 in separate processes.
-
-### With Docker
-
-Start local Postgres from the repository root:
-
-```
-docker compose up -d postgres
-```
-
-To run the complete containerized stack instead, use:
-
-```
+```bash
 docker compose up --build
 ```
 
-The dashboard is then available at `http://localhost:8080`, the API at `http://localhost:8000`, and migrations run automatically when the backend starts.
+Open `http://localhost:8080`. The API is available at `http://localhost:8000`; migrations run when the backend container starts.
 
-Then configure the backend for the Compose database before running migrations:
+To run only Postgres and use local processes:
 
-```
+```bash
+docker compose up -d postgres
 cd backend
-py -3.13 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -e ".[dev]"
-Copy-Item .env.example .env
-# Set DATABASE_URL=postgresql+asyncpg://recoverai:recoverai@localhost:5432/recoverai
+cp .env.example .env
+sed -i 's#^DATABASE_URL=.*#DATABASE_URL=postgresql+asyncpg://recoverai:recoverai@localhost:5432/recoverai#' .env
+python3.13 -m venv .venv
+. .venv/bin/activate
+python -m pip install -e '.[dev]'
 alembic upgrade head
 uvicorn app.main:app --reload
 ```
 
 In a second terminal:
 
-```
+```bash
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
 
-The frontend proxies `/health` and `/api` to FastAPI on port 8000. Razorpay credentials must be test-mode values and are only needed for live integration actions; the synthetic batch uses a simulated client.
+## Manual Setup (Windows/macOS/Linux)
 
-**Useful endpoints:**
+Requirements: Python 3.13, Node.js 20+, and a reachable Postgres database. Docker is not required.
+
+### Windows PowerShell
+
+```powershell
+cd backend
+py -3.13 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+Copy-Item .env.example .env
+# Edit .env and set DATABASE_URL to your Postgres URL.
+
+alembic upgrade head
+Start-Process powershell -ArgumentList '-NoExit', '-Command', 'cd frontend; npm ci; npm run dev'
+uvicorn app.main:app --reload
+```
+
+### macOS/Linux
+
+```bash
+cd backend
+python3.13 -m venv .venv
+. .venv/bin/activate
+cp .env.example .env
+# Edit .env and set DATABASE_URL to your Postgres URL.
+python -m pip install -e '.[dev]'
+alembic upgrade head
+cd ../frontend
+npm ci
+npm run dev
+```
+
+Run the backend in another terminal with the same activated environment:
+
+```bash
+cd backend
+. .venv/bin/activate
+uvicorn app.main:app --reload
+```
+
+Razorpay values must be test-mode credentials and are only needed for live integration actions. The synthetic batch uses a simulated client.
+
+### Demo-only authentication
+
+`POST /api/auth/login` is a **demo-only stub** that accepts any email and password. It is not an authentication boundary; production deployment must use Firebase Auth and merchant-level authorization.
+
+### Useful endpoints
 
 - `GET /health` — application and database liveness
 - `POST /webhooks/razorpay` — signed webhook ingestion
 - `GET /api/dashboard/summary` — aggregate recovery metrics
 - `GET /api/dashboard/overview` — funnel, subscriptions, and exceptions
-- `POST /api/auth/login` — local Firebase Auth stub for the demo
 - `GET /api/recovery-metrics` — dashboard funnel and recovery totals
 - `GET /api/subscriptions` — paginated subscription list
-- `GET /api/exceptions` — paginated unresolved recovery cases; supports `category` and `outcome` filters
+- `GET /api/exceptions` — unresolved cases with category and outcome filters
 - `GET /api/exceptions/{outcome_id}/audit` — ordered audit trail for one case
 
-The frontend opens at the Vite URL shown by `npm run dev`. Use any email and password for the local auth stub; production authentication is reserved for Firebase Auth deployment.
+### Run the synthetic batch
 
-### Running the synthetic demo batch
-
-```
+```bash
 cd backend
-.\.venv\Scripts\python.exe -m scripts.run_synthetic_batch --count 60 --seed 20260826
+python -m scripts.run_synthetic_batch --count 60 --seed 20260826
 ```
 
-After the batch completes, refresh the dashboard to inspect the generated subscriptions, recovery funnel, recovered amounts, and exception list.
+## Design Decisions
 
-## Validation
+- Rules run before the LLM so clear Razorpay decline codes are classified deterministically; the LLM is reserved for ambiguous failures.
+- The guardrail is a pure deterministic function that enforces cancellation freezes, retry limits, and cooldowns independently of model output.
+- Webhook ingestion uses the Razorpay event ID as a Postgres unique key and `ON CONFLICT DO NOTHING`, so redeliveries create one payment event.
+- Signature validation uses HMAC-SHA256 over the raw request body before JSON parsing, and rejects missing or invalid signatures.
+- The executor commits the guardrail verdict and requested action audit before calling the injected Razorpay client.
 
-```
-cd backend
-.\.venv\Scripts\python.exe -m pytest -q
-.\.venv\Scripts\python.exe -m ruff check app tests
-cd ..\frontend
-npm run build
-```
+## Testing
+
+The backend tests cover health and dashboard endpoints, diagnosis rules and LLM fallback, policy decisions, guardrail limits and freezes, executor ordering with a simulated client, retry scheduling and concurrency, synthetic metrics, webhook signature validation, and webhook idempotency. The frontend build is checked separately in CI.
 
 ## What I'd Build Next
 
-- Replace the local auth stub with Firebase Auth and merchant-level access control.
+- Replace the demo auth stub with Firebase Auth and merchant-level access control.
 - Replace the simulated batch client with recorded Razorpay test-mode fixtures.
 - Add Cloud Run, Cloud SQL, and managed worker deployment configuration.
 - Add richer filters and audit-log drill-down for exception handling.
