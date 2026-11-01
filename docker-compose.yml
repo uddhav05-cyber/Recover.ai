@@ -23,6 +23,7 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://recoverai:recoverai@postgres:5432/recoverai
       APP_ENV: docker
+      # Use the service hostname so the API can reach Postgres on the Compose network.
     depends_on:
       postgres:
         condition: service_healthy
